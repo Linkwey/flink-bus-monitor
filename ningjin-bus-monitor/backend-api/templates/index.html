@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=1920, height=1080">
+    <title>宁津县公交GPS实时监控大屏</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            width: 100vw; height: 100vh;
+            background: #0A1A2F; color: #fff;
+            font-family: "Microsoft YaHei", sans-serif;
+            display: grid;
+            grid-template-columns: 1fr 3fr 1fr;
+            grid-template-rows: 50px 1fr 1fr 110px;
+            gap: 6px; padding: 6px; overflow: hidden;
+        }
+        .header {
+            grid-column: 1 / -1; grid-row: 1;
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 0 20px; background: rgba(16,42,67,0.9); border-radius: 4px; font-size: 14px;
+        }
+        .header .title { font-size: 24px; font-weight: bold; color: #fff; }
+        .header .current-time { color: #FFAA00; font-weight: bold; font-size: 20px; }
+
+        .card {
+            background: rgba(16,42,67,0.8); border-radius: 4px; padding: 8px;
+            display: flex; flex-direction: column; align-items: center; justify-content: center; overflow: hidden;
+        }
+        .card .label { font-size: 13px; color: #aaa; margin-bottom: 4px; }
+        .card .value { font-size: 44px; font-weight: bold; color: #00FFCC; line-height: 1.2; }
+        .card .unit { font-size: 17px; color: #ccc; }
+
+        .m01 { grid-column: 1; grid-row: 2; }
+        .m06 { grid-column: 2; grid-row: 2 / 4; display: flex; }
+        .m03 { grid-column: 3; grid-row: 2; }
+        .m02 { grid-column: 1; grid-row: 3; }
+        .m04 { grid-column: 3; grid-row: 3; }
+
+        /* 告警滚动区域样式 */
+        .m05 {
+            grid-column: 1 / -1; grid-row: 4;
+            position: relative; overflow: hidden;
+            background: rgba(16,42,67,0.9); border-radius: 4px;
+            height: 110px; display: flex; align-items: center;
+        }
+        .scroll-wrapper {
+            width: 100%; height: 100%; position: relative; overflow: hidden;
+        }
+        .scroll-list {
+            position: absolute; width: 100%; top: 0; margin: 0; padding: 0;
+            list-style: none; display: flex; flex-direction: column; align-items: center;
+            animation: scroll-up 15s linear infinite;
+        }
+        .scroll-list:hover { animation-play-state: paused; }
+        @keyframes scroll-up {
+            0% { transform: translateY(100%); }
+            100% { transform: translateY(-100%); }
+        }
+        .alert-item {
+            padding: 6px 0; white-space: nowrap; display: block;
+            font-size: 16px; font-weight: bold; line-height: 1.5;
+            text-align: center; width: auto;
+        }
+        .alert-over { color: #FF4444; }
+        .alert-low { color: #FFAA00; }
+
+        #baiduMap { width: 100%; height: 100%; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <span class="title">🚌 宁津县公交GPS实时监控大屏</span>
+        <span class="current-time" id="currentTimeLabel"></span>
+    </div>
+
+    <div class="card m01">
+        <div class="label">M-01 实时在线车辆总数</div>
+        <div class="value" id="onlineCount">--</div>
+        <div class="unit">辆</div>
+    </div>
+    <div class="card m06" id="mapContainer">
+        <div id="baiduMap"></div>
+    </div>
+    <div class="card m03">
+        <div class="label">M-03 全城平均速度</div>
+        <div class="value" id="avgSpeed">--</div>
+        <div id="trafficLabel" style="font-size:15px;margin-top:2px;"></div>
+    </div>
+    <div class="card m02">
+        <div class="label">M-02 线路在线Top5</div>
+        <div id="top5Chart" style="width:100%;height:100%;"></div>
+    </div>
+    <div class="card m04">
+        <div class="label">M-04 车辆状态分布</div>
+        <div id="statusChart" style="width:100%;height:100%;"></div>
+    </div>
+
+    <!-- M-05 告警滚动区域 -->
+    <div class="m05" id="alertBar">
+        <div class="scroll-wrapper">
+            <div class="scroll-list" id="scrollList"></div>
+        </div>
+    </div>
+
+    <script src="https://api.map.baidu.com/api?v=1.0&type=webgl&ak=YOUR_BAIDU_MAP_AK"></script>
+    <!-- 使用时请将 YOUR_BAIDU_MAP_AK 替换为百度地图开放平台申请的有效密钥 -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+    <script>
+        var map = new BMapGL.Map("baiduMap");
+        map.centerAndZoom(new BMapGL.Point(116.800286, 37.642706), 13);
+        map.enableScrollWheelZoom();
+        var markers = [];
+
+        var top5Chart = echarts.init(document.getElementById('top5Chart'));
+        var statusChart = echarts.init(document.getElementById('statusChart'));
+
+        // 主数据更新（指标 + 地图），每2秒
+        function fetchData() {
+            fetch('/api/indicators').then(r => r.json()).then(d => { updateNumbers(d); updateCharts(d); }).catch(e => console.error(e));
+            fetch('/api/vehicles').then(r => r.json()).then(updateMap).catch(e => console.error(e));
+        }
+
+        // 独立时间更新，每5秒
+        function fetchTime() {
+            fetch('/api/latest_time').then(r => r.json()).then(data => {
+                if (data && data.time) {
+                    var displayTime = data.time.split('.')[0];
+                    var timeLabel = document.getElementById('currentTimeLabel');
+                    if (timeLabel) timeLabel.innerText = '数据时刻：' + displayTime;
+                }
+            }).catch(e => console.error('时间请求失败:', e));
+        }
+
+        // 告警数据更新，每2秒（与主数据同步）
+        function fetchAlerts() {
+            fetch('/api/alerts').then(r => r.json()).then(updateAlerts).catch(e => console.error(e));
+        }
+
+        function updateNumbers(d) {
+            var onlineEl = document.getElementById('onlineCount');
+            var speedEl = document.getElementById('avgSpeed');
+            var trafficEl = document.getElementById('trafficLabel');
+            if (onlineEl) onlineEl.innerText = d.online_count || '--';
+            if (speedEl) speedEl.innerText = (d.avg_speed ? Number(d.avg_speed).toFixed(1) : '--') + ' km/h';
+            if (trafficEl) {
+                var s = d.traffic_status || '';
+                trafficEl.innerText = s;
+                trafficEl.style.color = s === '通畅' ? '#00FF00' : s === '缓行' ? '#FFFF00' : s === '拥堵' ? '#FF4444' : '#ccc';
+            }
+        }
+
+        function updateCharts(d) {
+            try {
+                if (d.top5_lines && d.top5_lines.length > 0) {
+                    var lines = d.top5_lines.map(item => item.line);
+                    var counts = d.top5_lines.map(item => item.count);
+                    top5Chart.setOption({
+                        animation: true, animationDuration: 500,
+                        grid: { left: 50, right: 20, top: 10, bottom: 10 },
+                        xAxis: { type: 'value', show: false },
+                        yAxis: { type: 'category', data: lines.reverse(), axisLine: { show: false }, axisTick: { show: false }, axisLabel: { color: '#ccc', fontSize: 12 } },
+                        series: [{ type: 'bar', data: counts.reverse(), barWidth: 12, label: { show: true, position: 'right', color: '#00FFCC', fontSize: 12 }, itemStyle: { color: '#00FFCC' } }]
+                    });
+                }
+            } catch(e) {}
+            try {
+                if (d.status_dist) {
+                    var dist = d.status_dist;
+                    var total = (dist.moving || 0) + (dist.parking || 0) + (dist.offline || 0);
+                    statusChart.setOption({
+                        animation: true, animationDuration: 500,
+                        title: { text: total, left: 'center', top: '42%', textStyle: { color: '#00FFCC', fontSize: 22, fontWeight: 'bold' } },
+                        graphic: [{ type: 'text', left: 'center', top: '52%', style: { text: '总车辆', fill: '#aaa', fontSize: 10, textAlign: 'center' } }],
+                        legend: { orient: 'horizontal', bottom: 5, left: 'center', itemWidth: 10, itemHeight: 10, textStyle: { color: '#aaa', fontSize: 10 },
+                            formatter: function(name) {
+                                var item = [{ value: dist.moving, name: '行驶中' }, { value: dist.parking, name: '停车中' }, { value: dist.offline, name: '离线' }].find(i => i.name === name);
+                                if (item) { var pct = total > 0 ? (item.value / total * 100).toFixed(1) : 0; return name + ' ' + pct + '%'; }
+                                return name;
+                            }
+                        },
+                        series: [{
+                            type: 'pie',
+                            radius: ['55%', '75%'],
+                            center: ['50%', '48%'],
+                            avoidLabelOverlap: false,
+                            label: {
+                                show: true, position: 'inside', formatter: '{c} 辆',
+                                color: '#fff', fontSize: 11, fontWeight: 'bold',
+                                textBorderColor: '#000', textBorderWidth: 4
+                            },
+                            data: [
+                                { value: dist.moving, name: '行驶中', itemStyle: { color: '#00CC66' } },
+                                { value: dist.parking, name: '停车中', itemStyle: { color: '#FFAA00' } },
+                                { value: dist.offline, name: '离线', itemStyle: { color: '#666' } }
+                            ]
+                        }]
+                    });
+                }
+            } catch(e) {}
+        }
+
+        function updateMap(data) {
+            try {
+                markers.forEach(m => map.removeOverlay(m));
+                markers = [];
+                if (!data.features) return;
+                data.features.forEach(f => {
+                    var c = f.geometry.coordinates;
+                    var p = f.properties;
+                    var icon = new BMapGL.Icon('data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><circle cx="10" cy="10" r="8" fill="'+(p.color||'green')+'" stroke="#333" stroke-width="2"/></svg>'), new BMapGL.Size(20,20));
+                    var pt = new BMapGL.Point(c[0], c[1]);
+                    var m = new BMapGL.Marker(pt, {icon: icon});
+                    var labelText = String(parseInt(p.plate));
+                    var label = new BMapGL.Label(labelText, { offset: new BMapGL.Size(10, -18) });
+                    label.setStyle({ color:'#333', fontSize:'11px', backgroundColor:'rgba(255,255,255,0.85)', border:'1px solid #aaa', padding:'2px 4px', borderRadius:'3px', fontWeight:'bold' });
+                    m.setLabel(label);
+                    map.addOverlay(m);
+                    markers.push(m);
+                    m.addEventListener('click', function(){
+                        map.openInfoWindow(new BMapGL.InfoWindow('<b>'+labelText+'</b><br>线路：'+p.line+'<br>速度：'+p.speed+' km/h', {width:120}), pt);
+                    });
+                });
+            } catch(e){}
+        }
+
+        function updateAlerts(data) {
+            var list = document.getElementById('scrollList');
+            if (!list) return;
+            if (!data || data.length === 0) {
+                list.innerHTML = '<span class="alert-item" style="color:#666;">暂无告警</span>';
+                return;
+            }
+            var newContent = data.map(a => {
+                var cls = (a.type === '超速') ? 'alert-over' : 'alert-low';
+                return `<span class="alert-item ${cls}">⚠ ${a.time} ${a.type} 车号${parseInt(a.plate)} ${a.speed}km/h 线路${a.line}</span>`;
+            }).join('');
+            // 只有内容变化时才更新DOM，保持动画平滑
+            if (list.getAttribute('data-content') !== newContent) {
+                list.setAttribute('data-content', newContent);
+                list.innerHTML = newContent;
+            }
+        }
+
+        // 启动轮询
+        fetchData();
+        fetchTime();
+        fetchAlerts();
+        setInterval(fetchData, 2000);     // 指标+地图每2秒
+        setInterval(fetchTime, 5000);     // 时间每5秒
+        setInterval(fetchAlerts, 2000);   // 告警每2秒
+    </script>
+</body>
+</html>

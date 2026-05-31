@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>宁津县公交实时点位查询 - 模拟播放版</title>
+    <style>
+        body { margin: 0; font-family: "Microsoft YaHei", sans-serif; }
+        #map { height: 100vh; width: 100vw; }
+        .control-panel {
+            position: absolute;
+            top: 10px; left: 10px;
+            background: white;
+            padding: 15px;
+            z-index: 1000;
+            border-radius: 6px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            min-width: 260px;
+        }
+        .control-panel h4 { margin: 0 0 8px 0; font-size: 14px; }
+        .control-panel label { font-size: 13px; display: inline-block; width: 70px; }
+        .control-panel input, .control-panel select, .control-panel button {
+            font-size: 13px; padding: 4px 6px; margin: 3px 0;
+        }
+        #currentTime { font-weight: bold; color: #d9534f; }
+        #info { margin-top: 8px; font-size: 13px; color: #333; }
+        .note { font-size: 11px; color: #888; margin-top: 4px; }
+    </style>
+    <script src="https://api.map.baidu.com/api?v=1.0&type=webgl&ak={{ baidu_ak }}"></script>
+</head>
+<body>
+    <div class="control-panel">
+        <h4>🚌 实时模拟控制</h4>
+        <div>
+            <label for="startTimeInput">起始时间：</label>
+            <input type="text" id="startTimeInput" value="12:00" placeholder="HH:MM" size="6">
+        </div>
+        <div>
+            <label for="speedSelect">模拟倍速：</label>
+            <select id="speedSelect">
+                <option value="1">1x (实时)</option>
+                <option value="10" selected>10x</option>
+                <option value="60">60x</option>
+                <option value="120">120x</option>
+                <option value="600">600x (极速)</option>
+            </select>
+        </div>
+        <div style="margin-top: 6px;">
+            <button onclick="startSimulation()" id="startBtn">▶ 开始播放</button>
+            <button onclick="pauseSimulation()" id="pauseBtn" disabled>⏸ 暂停</button>
+            <button onclick="stopSimulation()" id="stopBtn" disabled>⏹ 停止</button>
+        </div>
+        <div style="margin-top: 8px;">
+            <span>当前模拟时间：</span><br>
+            <span id="currentTime">未开始</span>
+        </div>
+        <div id="info"></div>
+        <div class="note">时间格式 HH:MM，将在 05:09 ~ 22:59 之间运行</div>
+    </div>
+    <div id="map"></div>
+
+    <script>
+        var map = new BMapGL.Map("map");
+        var centerPoint = new BMapGL.Point({{ center_lng }}, {{ center_lat }});
+        map.centerAndZoom(centerPoint, 13);
+        map.enableScrollWheelZoom();
+
+        var markers = [];
+        var simTimer = null;
+        var isRunning = false;
+        var currentSimTime = null;
+        var simulationStepSeconds = 10;
+        var speed = 10;
+        var minTime = new Date(2022, 4, 7, 5, 9, 0);
+        var maxTime = new Date(2022, 4, 7, 23, 0, 0);
+
+        function getSpeed() {
+            return parseInt(document.getElementById('speedSelect').value);
+        }
+
+        function formatTime(date) {
+            var h = date.getHours().toString().padStart(2, '0');
+            var m = date.getMinutes().toString().padStart(2, '0');
+            return h + ':' + m;
+        }
+
+        function formatTimeFull(date) {
+            var h = date.getHours().toString().padStart(2, '0');
+            var m = date.getMinutes().toString().padStart(2, '0');
+            var s = date.getSeconds().toString().padStart(2, '0');
+            return h + ':' + m + ':' + s;
+        }
+
+        function fetchAndUpdate(time) {
+            var timeStr = formatTime(time);
+            fetch('/query?time=' + encodeURIComponent(timeStr))
+                .then(res => res.json())
+                .then(data => {
+                    markers.forEach(m => map.removeOverlay(m));
+                    markers = [];
+
+                    var count = data.count || 0;
+                    document.getElementById('info').innerHTML =
+                        '车辆在线数：<strong>' + count + '</strong>（绿行/红停）';
+
+                    data.features.forEach(f => {
+                        var lng = f.geometry.coordinates[0];
+                        var lat = f.geometry.coordinates[1];
+                        var props = f.properties;
+                        var plate = props.plate; // 车号
+
+                        // 创建圆点图标
+                        var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20">' +
+                                  '<circle cx="10" cy="10" r="8" fill="' + props.color + '" stroke="#333" stroke-width="2" fill-opacity="0.85"/>' +
+                                  '</svg>';
+                        var icon = new BMapGL.Icon(
+                            'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg),
+                            new BMapGL.Size(20, 20)
+                        );
+
+                        // 创建车号标签
+                        var label = new BMapGL.Label(plate, {
+                            offset: new BMapGL.Size(10, -18),  // 位于图标上方
+                            style: {
+                                color: '#333',
+                                fontSize: '11px',
+                                backgroundColor: 'rgba(255,255,255,0.85)',
+                                border: '1px solid #aaa',
+                                padding: '2px 4px',
+                                borderRadius: '3px',
+                                fontWeight: 'bold',
+                                whiteSpace: 'nowrap'
+                            }
+                        });
+
+                        var point = new BMapGL.Point(lng, lat);
+                        var marker = new BMapGL.Marker(point, { icon: icon, label: label });
+                        map.addOverlay(marker);
+                        markers.push(marker);
+
+                        // 点击弹窗
+                        var infoWindow = new BMapGL.InfoWindow(
+                            '<b>' + plate + '</b><br>线路：' + props.line + '<br>速度：' + props.speed + ' km/h',
+                            { width: 120 }
+                        );
+                        marker.addEventListener('click', function () {
+                            map.openInfoWindow(infoWindow, point);
+                        });
+                    });
+                })
+                .catch(err => console.error(err));
+        }
+
+        function tick() {
+            if (!isRunning || !currentSimTime) return;
+
+            if (currentSimTime >= maxTime) {
+                pauseSimulation();
+                alert('已到达数据结尾时间 23:00，模拟停止。');
+                return;
+            }
+
+            currentSimTime = new Date(currentSimTime.getTime() + simulationStepSeconds * 1000);
+            document.getElementById('currentTime').innerText = formatTimeFull(currentSimTime);
+            fetchAndUpdate(currentSimTime);
+        }
+
+        function startSimulation() {
+            var startTimeStr = document.getElementById('startTimeInput').value.trim();
+            if (!startTimeStr) { alert('请输入起始时间！'); return; }
+            var parts = startTimeStr.split(':');
+            var hour = parseInt(parts[0]);
+            var minute = parseInt(parts[1]);
+            if (isNaN(hour) || isNaN(minute)) { alert('时间格式错误'); return; }
+            currentSimTime = new Date(2022, 4, 7, hour, minute, 0);
+            if (currentSimTime < minTime) { currentSimTime = minTime; }
+            if (currentSimTime > maxTime) { alert('起始时间不能晚于 23:00'); return; }
+
+            speed = getSpeed();
+            document.getElementById('currentTime').innerText = formatTimeFull(currentSimTime);
+            isRunning = true;
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('pauseBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = false;
+
+            fetchAndUpdate(currentSimTime);
+
+            var realInterval = Math.max(100, (simulationStepSeconds / speed) * 1000);
+            if (simTimer) clearInterval(simTimer);
+            simTimer = setInterval(tick, realInterval);
+        }
+
+        function pauseSimulation() {
+            isRunning = false;
+            if (simTimer) { clearInterval(simTimer); simTimer = null; }
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('pauseBtn').disabled = true;
+        }
+
+        function stopSimulation() {
+            pauseSimulation();
+            currentSimTime = null;
+            document.getElementById('currentTime').innerText = '未开始';
+            document.getElementById('info').innerHTML = '';
+            document.getElementById('stopBtn').disabled = true;
+        }
+    </script>
+</body>
+</html>
